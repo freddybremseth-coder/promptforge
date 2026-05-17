@@ -25,15 +25,20 @@ create index if not exists idx_projects_status on projects(status);
 
 alter table projects enable row level security;
 
+drop policy if exists "projects_select_own" on projects;
 create policy "projects_select_own" on projects
   for select using (auth.uid() = user_id);
+drop policy if exists "projects_insert_own" on projects;
 create policy "projects_insert_own" on projects
   for insert with check (auth.uid() = user_id);
+drop policy if exists "projects_update_own" on projects;
 create policy "projects_update_own" on projects
   for update using (auth.uid() = user_id);
+drop policy if exists "projects_delete_own" on projects;
 create policy "projects_delete_own" on projects
   for delete using (auth.uid() = user_id);
 
+drop trigger if exists projects_set_updated_at on projects;
 create trigger projects_set_updated_at
   before update on projects
   for each row execute function moddatetime(updated_at);
@@ -52,18 +57,22 @@ create index if not exists idx_packages_project_id on prompt_packages(project_id
 
 alter table prompt_packages enable row level security;
 
+drop policy if exists "prompt_packages_select_own" on prompt_packages;
 create policy "prompt_packages_select_own" on prompt_packages
   for select using (
     project_id in (select id from projects where user_id = auth.uid())
   );
+drop policy if exists "prompt_packages_insert_own" on prompt_packages;
 create policy "prompt_packages_insert_own" on prompt_packages
   for insert with check (
     project_id in (select id from projects where user_id = auth.uid())
   );
+drop policy if exists "prompt_packages_update_own" on prompt_packages;
 create policy "prompt_packages_update_own" on prompt_packages
   for update using (
     project_id in (select id from projects where user_id = auth.uid())
   );
+drop policy if exists "prompt_packages_delete_own" on prompt_packages;
 create policy "prompt_packages_delete_own" on prompt_packages
   for delete using (
     project_id in (select id from projects where user_id = auth.uid())
@@ -81,11 +90,14 @@ create table if not exists usage_quotas (
 
 alter table usage_quotas enable row level security;
 
+drop policy if exists "usage_quotas_select_own" on usage_quotas;
 create policy "usage_quotas_select_own" on usage_quotas
   for select using (auth.uid() = user_id);
+drop policy if exists "usage_quotas_update_own" on usage_quotas;
 create policy "usage_quotas_update_own" on usage_quotas
   for update using (auth.uid() = user_id);
 
+drop trigger if exists usage_quotas_set_updated_at on usage_quotas;
 create trigger usage_quotas_set_updated_at
   before update on usage_quotas
   for each row execute function moddatetime(updated_at);

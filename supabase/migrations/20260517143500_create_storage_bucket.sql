@@ -5,6 +5,7 @@ insert into storage.buckets (id, name, public)
 values ('packages', 'packages', false)
 on conflict (id) do nothing;
 
+drop policy if exists "packages_read_own" on storage.objects;
 create policy "packages_read_own"
   on storage.objects for select
   using (
@@ -12,6 +13,7 @@ create policy "packages_read_own"
     and auth.uid()::text = (storage.foldername(name))[1]
   );
 
+drop policy if exists "packages_insert_own" on storage.objects;
 create policy "packages_insert_own"
   on storage.objects for insert
   with check (

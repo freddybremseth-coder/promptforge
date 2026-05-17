@@ -4,12 +4,20 @@
 create extension if not exists moddatetime;
 create extension if not exists pgcrypto;
 
-create type pricing_type as enum ('one_time', 'recurring');
-create type pricing_plan_interval as enum ('day', 'week', 'month', 'year');
-create type subscription_status as enum (
-  'trialing', 'active', 'canceled', 'incomplete', 'incomplete_expired',
-  'past_due', 'unpaid', 'paused'
-);
+do $$ begin
+  create type pricing_type as enum ('one_time', 'recurring');
+exception when duplicate_object then null; end $$;
+
+do $$ begin
+  create type pricing_plan_interval as enum ('day', 'week', 'month', 'year');
+exception when duplicate_object then null; end $$;
+
+do $$ begin
+  create type subscription_status as enum (
+    'trialing', 'active', 'canceled', 'incomplete', 'incomplete_expired',
+    'past_due', 'unpaid', 'paused'
+  );
+exception when duplicate_object then null; end $$;
 
 create table if not exists users (
   id uuid primary key references auth.users on delete cascade,
@@ -19,7 +27,9 @@ create table if not exists users (
   payment_method jsonb
 );
 alter table users enable row level security;
+drop policy if exists "users_select_self" on users;
 create policy "users_select_self" on users for select using (auth.uid() = id);
+drop policy if exists "users_update_self" on users;
 create policy "users_update_self" on users for update using (auth.uid() = id);
 
 create table if not exists customers (
@@ -37,6 +47,7 @@ create table if not exists products (
   metadata jsonb
 );
 alter table products enable row level security;
+drop policy if exists "products_select_public" on products;
 create policy "products_select_public" on products for select using (true);
 
 create table if not exists prices (
@@ -53,6 +64,7 @@ create table if not exists prices (
   metadata jsonb
 );
 alter table prices enable row level security;
+drop policy if exists "prices_select_public" on prices;
 create policy "prices_select_public" on prices for select using (true);
 
 create table if not exists subscriptions (
@@ -73,6 +85,7 @@ create table if not exists subscriptions (
   trial_end timestamptz
 );
 alter table subscriptions enable row level security;
+drop policy if exists "subscriptions_select_own" on subscriptions;
 create policy "subscriptions_select_own" on subscriptions
   for select using (auth.uid() = user_id);
 
