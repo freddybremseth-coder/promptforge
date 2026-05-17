@@ -11,7 +11,7 @@ interface PageProps {
   params: Promise<{ id: string }>
 }
 
-const STALL_AFTER_MS = 120_000
+const STALL_AFTER_MS = 45_000
 
 export default function GeneratePage({ params }: PageProps) {
   const { id } = use(params)
@@ -52,12 +52,20 @@ export default function GeneratePage({ params }: PageProps) {
     setStalled(false)
   }, [object])
 
+  const fileCount = object?.files?.length ?? 0
+  // Treat the render as complete only when each file has both a path and
+  // non-empty content. Partial streamed files have undefined fields.
+  const allFilesComplete =
+    fileCount > 0 &&
+    (object?.files ?? []).every((f) => f?.path && f?.content && f.content.length > 50)
+  const streamCutEarly = !isLoading && !error && startedRef.current === id && !allFilesComplete
+
   useEffect(() => {
-    if (!isLoading && object?.files && object.files.length > 0 && !error) {
+    if (!isLoading && allFilesComplete && !error) {
       const t = setTimeout(() => router.push(`/new/${id}/done` as never), 800)
       return () => clearTimeout(t)
     }
-  }, [isLoading, object, error, id, router])
+  }, [isLoading, allFilesComplete, error, id, router])
 
   function retry() {
     startedRef.current = id
@@ -65,8 +73,6 @@ export default function GeneratePage({ params }: PageProps) {
     setStalled(false)
     submit({ projectId: id })
   }
-
-  const fileCount = object?.files?.length ?? 0
 
   return (
     <div className="space-y-4">
@@ -85,6 +91,23 @@ export default function GeneratePage({ params }: PageProps) {
             type="button"
             onClick={retry}
             className="mt-2 rounded border border-red-300 px-2 py-1 text-xs hover:bg-red-100"
+          >
+            Prøv igjen
+          </button>
+        </div>
+      )}
+
+      {streamCutEarly && (
+        <div className="rounded-md border border-amber-300 bg-amber-50 p-4 text-sm text-amber-900">
+          <p className="font-medium">Streamen ble avbrutt før alle filer var ferdige.</p>
+          <p className="mt-1 text-xs">
+            Vercel Hobby har 60s timeout. Pakken kommer fram etter 2-3 forsøk fordi cache
+            varmes opp.
+          </p>
+          <button
+            type="button"
+            onClick={retry}
+            className="mt-2 rounded border border-amber-400 px-3 py-1.5 text-xs hover:bg-amber-100"
           >
             Prøv igjen
           </button>

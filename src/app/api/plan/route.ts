@@ -9,9 +9,12 @@ import { PlanSchema } from '@/lib/schemas'
 import { createServerSupabaseClient } from '@/lib/supabase/server'
 import { getPreset } from '@/presets'
 
-export const runtime = 'edge'
+// Node runtime: Vercel Hobby caps Edge at 25s, but Node serverless allows up
+// to 60s — and Opus + JSON-mode planning needs more than 25s even without
+// extended thinking.
+export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
-export const maxDuration = 300
+export const maxDuration = 60
 
 const BodySchema = z.object({ projectId: z.string().uuid() })
 
@@ -88,12 +91,9 @@ export async function POST(req: Request) {
         },
         { role: 'user', content: userMessage },
       ],
-      providerOptions: {
-        anthropic: {
-          thinking: { type: 'enabled', budgetTokens: 6000 },
-        },
-      },
-      maxTokens: 16000,
+      // Extended thinking is disabled to fit within the 60s Hobby Node window.
+      // Pro users can re-enable by setting THINKING_BUDGET in env and adapting.
+      maxTokens: 6000,
       onError({ error }) {
         console.error('[plan] stream error', error)
       },

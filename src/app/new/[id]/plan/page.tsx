@@ -11,7 +11,9 @@ interface PageProps {
 }
 
 // If the stream produces nothing new for this long, treat it as stalled.
-const STALL_AFTER_MS = 120_000
+// Tuned for Hobby tier's 60s Node window — anything past 45s without new
+// data is almost certainly cut.
+const STALL_AFTER_MS = 45_000
 
 export default function PlanPage({ params }: PageProps) {
   const { id } = use(params)
@@ -64,6 +66,14 @@ export default function PlanPage({ params }: PageProps) {
   }
 
   const plan = object
+  // A complete plan must at minimum have a summary and at least one phase.
+  // useObject doesn't enforce schema during streaming, so we check ourselves.
+  const planComplete = Boolean(
+    plan?.project_summary && plan?.phases && plan.phases.length > 0
+  )
+  // Stream ended (isLoading false), no error fired, but plan never completed.
+  // Most common cause on Hobby: Vercel killed the function mid-stream.
+  const streamCutEarly = !isLoading && !error && startedRef.current === id && !planComplete
 
   return (
     <div className="space-y-6">
@@ -71,10 +81,10 @@ export default function PlanPage({ params }: PageProps) {
         <div>
           <h1 className="text-2xl font-semibold">Planlegger arkitekturen</h1>
           <p className="mt-1 text-sm text-zinc-600 dark:text-zinc-400">
-            Opus 4.7 (extended thinking) skisserer faser, konvensjoner og Skills.
+            Opus 4.7 skisserer faser, konvensjoner og Skills.
           </p>
         </div>
-        {!isLoading && plan && (
+        {!isLoading && planComplete && (
           <button
             type="button"
             onClick={() => router.push(`/new/${id}/generate` as never)}
@@ -84,6 +94,24 @@ export default function PlanPage({ params }: PageProps) {
           </button>
         )}
       </header>
+
+      {streamCutEarly && (
+        <div className="rounded-md border border-amber-300 bg-amber-50 p-4 text-sm text-amber-900">
+          <p className="font-medium">Streamen ble avbrutt før planen var ferdig.</p>
+          <p className="mt-1 text-xs">
+            Vercel Hobby har 60s timeout på serverless-funksjoner. Hvis Opus brukte lengre tid
+            enn det, ble kallet kuttet. Prøv igjen — kall som var halvveis fullføres ofte
+            raskere på neste forsøk (cache).
+          </p>
+          <button
+            type="button"
+            onClick={retry}
+            className="mt-2 rounded border border-amber-400 px-3 py-1.5 text-xs hover:bg-amber-100"
+          >
+            Prøv igjen
+          </button>
+        </div>
+      )}
 
       {error && (
         <div className="rounded-md border border-red-300 bg-red-50 p-4 text-sm text-red-700">

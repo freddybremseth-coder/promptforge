@@ -10,9 +10,11 @@ import { createAdminSupabaseClient } from '@/lib/supabase/admin'
 import { createServerSupabaseClient } from '@/lib/supabase/server'
 import { getPreset } from '@/presets'
 
-export const runtime = 'edge'
+// Node runtime: Hobby caps Edge at 25s. Render generates several files of
+// real content with Opus and reliably needs more than that.
+export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
-export const maxDuration = 300
+export const maxDuration = 60
 
 const BodySchema = z.object({ projectId: z.string().uuid() })
 
@@ -92,7 +94,7 @@ export async function POST(req: Request) {
         },
         { role: 'user', content: userMessage },
       ],
-      maxTokens: 50000,
+      maxTokens: 12000,
       onError({ error }) {
         console.error('[render] stream error', error)
       },
