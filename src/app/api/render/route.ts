@@ -73,44 +73,53 @@ export async function POST(req: Request) {
     `Skill, one phase-prompt per phase, and a README.md.`,
   ].join('\n')
 
-  const result = streamObject({
-    model: anthropic(OPUS),
-    schema: PackageSchema,
-    messages: [
-      {
-        role: 'system',
-        content: RENDERER_SYSTEM_PROMPT,
-        providerOptions: {
-          anthropic: { cacheControl: { type: 'ephemeral' } },
-        },
-      },
-      { role: 'user', content: userMessage },
-    ],
-    providerOptions: {
-      anthropic: {
-        thinking: { type: 'adaptive' },
-        effort: 'high',
-        taskBudget: 50000,
-      },
-    },
-    onFinish: async (event) => {
-      try {
-        if (!event.object) return
-        const admin = createAdminSupabaseClient()
-        const tokenCost = (event.usage?.promptTokens ?? 0) + (event.usage?.completionTokens ?? 0)
-        await admin.from('prompt_packages').insert({
-          project_id: projectId,
-          files: event.object.files,
-          model_used: OPUS,
-          token_cost: tokenCost,
-        })
-        await admin.from('projects').update({ status: 'ready' }).eq('id', projectId)
-        await incrementQuota(user.id)
-      } catch {
-        // Stream is already closed; rely on Vercel logs for debugging.
-      }
-    },
-  })
+  if (!process.env.ANTHROPIC_API_KEY) {
+    return Response.json({ error: 'missing_anthropic_api_key' }, { status: 500 })
+  }
 
-  return result.toTextStreamResponse()
+  try {
+    const result = streamObject({
+      model: anthropic(OPUS),
+      schema: PackageSchema,
+      messages: [
+        {
+          role: 'system',
+          content: RENDERER_SYSTEM_PROMPT,
+          providerOptions: {
+            anthropic: { cacheControl: { type: 'ephemeral' } },
+          },
+        },
+        { role: 'user', content: userMessage },
+      ],
+      maxTokens: 50000,
+      onError({ error }) {
+        console.error('[render] stream error', error)
+      },
+      onFinish: async (event) => {
+        try {
+          if (!event.object) return
+          const admin = createAdminSupabaseClient()
+          const tokenCost = (event.usage?.promptTokens ?? 0) + (event.usage?.completionTokens ?? 0)
+          await admin.from('prompt_packages').insert({
+            project_id: projectId,
+            files: event.object.files,
+            model_used: OPUS,
+            token_cost: tokenCost,
+          })
+          await admin.from('projects').update({ status: 'ready' }).eq('id', projectId)
+          await incrementQuota(user.id)
+        } catch {
+          // Stream is already closed; rely on Vercel logs for debugging.
+        }
+      },
+    })
+
+    return result.toTextStreamResponse()
+  } catch (err) {
+    console.error('[render] setup error', err)
+    return Response.json(
+      { error: 'stream_setup_failed', detail: err instanceof Error ? err.message : 'unknown' },
+      { status: 500 }
+    )
+  }
 }

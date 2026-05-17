@@ -48,6 +48,10 @@ export async function POST(req: Request) {
     return Response.json({ error: 'unknown_preset' }, { status: 400 })
   }
 
+  if (!process.env.ANTHROPIC_API_KEY) {
+    return Response.json({ error: 'missing_anthropic_api_key' }, { status: 500 })
+  }
+
   await supabase.from('projects').update({ status: 'generating' }).eq('id', projectId)
 
   const userMessage = [
@@ -69,39 +73,49 @@ export async function POST(req: Request) {
     `Ultrathink, then produce a schema-valid Plan.`,
   ].join('\n')
 
-  const result = streamObject({
-    model: anthropic(OPUS),
-    schema: PlanSchema,
-    messages: [
-      {
-        role: 'system',
-        content: PLAN_SYSTEM_PROMPT,
-        providerOptions: {
-          anthropic: { cacheControl: { type: 'ephemeral' } },
+  try {
+    const result = streamObject({
+      model: anthropic(OPUS),
+      schema: PlanSchema,
+      messages: [
+        {
+          role: 'system',
+          content: PLAN_SYSTEM_PROMPT,
+          providerOptions: {
+            anthropic: { cacheControl: { type: 'ephemeral' } },
+          },
+        },
+        { role: 'user', content: userMessage },
+      ],
+      providerOptions: {
+        anthropic: {
+          thinking: { type: 'enabled', budgetTokens: 16000 },
         },
       },
-      { role: 'user', content: userMessage },
-    ],
-    providerOptions: {
-      anthropic: {
-        thinking: { type: 'adaptive' },
-        effort: 'xhigh',
-        taskBudget: 30000,
+      maxTokens: 30000,
+      onError({ error }) {
+        console.error('[plan] stream error', error)
       },
-    },
-    onFinish: async (event) => {
-      try {
-        if (event.object) {
-          await supabase
-            .from('projects')
-            .update({ plan: event.object })
-            .eq('id', projectId)
+      onFinish: async (event) => {
+        try {
+          if (event.object) {
+            await supabase
+              .from('projects')
+              .update({ plan: event.object })
+              .eq('id', projectId)
+          }
+        } catch {
+          // Stream is already closed; rely on Vercel logs for debugging.
         }
-      } catch {
-        // Stream is already closed; logging would risk leaking content.
-      }
-    },
-  })
+      },
+    })
 
-  return result.toTextStreamResponse()
+    return result.toTextStreamResponse()
+  } catch (err) {
+    console.error('[plan] setup error', err)
+    return Response.json(
+      { error: 'stream_setup_failed', detail: err instanceof Error ? err.message : 'unknown' },
+      { status: 500 }
+    )
+  }
 }

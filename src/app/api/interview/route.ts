@@ -37,24 +37,39 @@ export async function POST(req: Request) {
     return new Response('Not found', { status: 404 })
   }
 
-  const result = streamObject({
-    model: anthropic(HAIKU),
-    schema: InterviewSchema,
-    messages: [
-      {
-        role: 'system',
-        content: INTERVIEW_SYSTEM_PROMPT,
-        providerOptions: {
-          anthropic: { cacheControl: { type: 'ephemeral' } },
-        },
-      },
-      {
-        role: 'user',
-        content: `Råmål fra brukeren:\n\n"""${rawGoal}"""\n\nGenerer 3-6 spørsmål.`,
-      },
-    ],
-    maxTokens: 2000,
-  })
+  if (!process.env.ANTHROPIC_API_KEY) {
+    return Response.json({ error: 'missing_anthropic_api_key' }, { status: 500 })
+  }
 
-  return result.toTextStreamResponse()
+  try {
+    const result = streamObject({
+      model: anthropic(HAIKU),
+      schema: InterviewSchema,
+      messages: [
+        {
+          role: 'system',
+          content: INTERVIEW_SYSTEM_PROMPT,
+          providerOptions: {
+            anthropic: { cacheControl: { type: 'ephemeral' } },
+          },
+        },
+        {
+          role: 'user',
+          content: `Råmål fra brukeren:\n\n"""${rawGoal}"""\n\nGenerer 3-6 spørsmål.`,
+        },
+      ],
+      maxTokens: 2000,
+      onError({ error }) {
+        console.error('[interview] stream error', error)
+      },
+    })
+
+    return result.toTextStreamResponse()
+  } catch (err) {
+    console.error('[interview] setup error', err)
+    return Response.json(
+      { error: 'stream_setup_failed', detail: err instanceof Error ? err.message : 'unknown' },
+      { status: 500 }
+    )
+  }
 }

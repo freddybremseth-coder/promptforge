@@ -100,7 +100,19 @@ export default function InterviewPage({ params }: PageProps) {
 
       {error && (
         <div className="rounded-md border border-red-300 bg-red-50 p-4 text-sm text-red-700">
-          Noe gikk galt med å hente spørsmål. Prøv igjen.
+          <p className="font-medium">Kunne ikke hente spørsmål.</p>
+          <p className="mt-1 text-xs opacity-80">{error.message ?? String(error)}</p>
+          <button
+            type="button"
+            onClick={() => {
+              startedRef.current = null
+              const goal = sessionStorage.getItem(`pf:goal:${id}`)
+              if (goal) submit({ projectId: id, rawGoal: goal })
+            }}
+            className="mt-2 rounded border border-red-300 px-2 py-1 text-xs hover:bg-red-100"
+          >
+            Prøv igjen
+          </button>
         </div>
       )}
 
