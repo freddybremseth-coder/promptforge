@@ -2,7 +2,7 @@
 
 import { experimental_useObject as useObject } from 'ai/react'
 import { useRouter } from 'next/navigation'
-import { use, useEffect, useState } from 'react'
+import { use, useEffect, useRef, useState } from 'react'
 
 import { QuestionCard } from '@/components/QuestionCard'
 import { InterviewSchema, type Question } from '@/lib/schemas'
@@ -24,32 +24,40 @@ export default function InterviewPage({ params }: PageProps) {
     schema: InterviewSchema,
   })
 
+  // The `submit` reference from useObject changes on every render. If we put
+  // it in the dependency array we get an infinite loop: each new submit ref
+  // re-runs the effect, which calls submit, which re-renders, which yields a
+  // new submit ref. Guard with a ref so the effect only fires once per id.
+  const startedRef = useRef<string | null>(null)
   useEffect(() => {
-    let mounted = true
+    if (startedRef.current === id) return
+    startedRef.current = id
+    let cancelled = false
     async function load() {
-      const cached = sessionStorage.getItem(`pf:goal:${id}`)
-      if (cached) {
-        if (!mounted) return
-        setRawGoal(cached)
-        submit({ projectId: id, rawGoal: cached })
-        return
+      let goal = sessionStorage.getItem(`pf:goal:${id}`)
+      if (!goal) {
+        try {
+          const res = await fetch(`/api/projects/${id}`)
+          if (!res.ok || cancelled) return
+          const data = (await res.json()) as { raw_goal?: string }
+          goal = data.raw_goal ?? null
+          if (goal) sessionStorage.setItem(`pf:goal:${id}`, goal)
+        } catch {
+          return
+        }
       }
-      const res = await fetch(`/api/projects/${id}`)
-      if (!res.ok || !mounted) return
-      const data = (await res.json()) as { raw_goal?: string }
-      if (data.raw_goal) {
-        sessionStorage.setItem(`pf:goal:${id}`, data.raw_goal)
-        setRawGoal(data.raw_goal)
-        submit({ projectId: id, rawGoal: data.raw_goal })
-      }
+      if (!goal || cancelled) return
+      setRawGoal(goal)
+      submit({ projectId: id, rawGoal: goal })
     }
-    load().catch(() => null)
+    load()
     return () => {
-      mounted = false
+      cancelled = true
     }
-  }, [id, submit])
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [id])
 
-  async function startWithGoal(goal: string) {
+  function startWithGoal(goal: string) {
     sessionStorage.setItem(`pf:goal:${id}`, goal)
     setRawGoal(goal)
     submit({ projectId: id, rawGoal: goal })

@@ -1,7 +1,9 @@
 'use client'
 
 import { useRouter } from 'next/navigation'
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
+
+const PENDING_GOAL_KEY = 'pf:pending-goal'
 
 export default function NewProjectPage() {
   const router = useRouter()
@@ -9,9 +11,19 @@ export default function NewProjectPage() {
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
+  // Restore a goal that was typed before being bounced to /signin.
+  useEffect(() => {
+    const pending = localStorage.getItem(PENDING_GOAL_KEY)
+    if (pending) {
+      setRawGoal(pending)
+      localStorage.removeItem(PENDING_GOAL_KEY)
+    }
+  }, [])
+
   async function onSubmit(e: React.FormEvent) {
     e.preventDefault()
-    if (rawGoal.trim().length < 5) {
+    const goal = rawGoal.trim()
+    if (goal.length < 5) {
       setError('Skriv minst noen ord om hva du vil bygge.')
       return
     }
@@ -21,14 +33,18 @@ export default function NewProjectPage() {
       const res = await fetch('/api/projects', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ rawGoal }),
+        body: JSON.stringify({ rawGoal: goal }),
       })
       if (res.status === 401) {
+        localStorage.setItem(PENDING_GOAL_KEY, goal)
         router.push('/signin?redirect=/new')
         return
       }
       if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error ?? 'Kunne ikke opprette prosjekt')
       const { id } = (await res.json()) as { id: string }
+      // Hand the goal to the interview page so it doesn't need a server roundtrip
+      // and so the first stream call has the goal immediately.
+      sessionStorage.setItem(`pf:goal:${id}`, goal)
       router.push(`/new/${id}/interview` as never)
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Ukjent feil')
