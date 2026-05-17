@@ -11,3 +11,4 @@ out
 coverage
 .turbo
 evals/.cache
+*.tsbuildinfo
