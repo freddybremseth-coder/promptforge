@@ -2,7 +2,7 @@
 
 import { experimental_useObject as useObject } from 'ai/react'
 import { useRouter } from 'next/navigation'
-import { use, useEffect } from 'react'
+import { use, useEffect, useRef, useState } from 'react'
 
 import { PlanSchema } from '@/lib/schemas'
 
@@ -10,18 +10,58 @@ interface PageProps {
   params: Promise<{ id: string }>
 }
 
+// If the stream produces nothing new for this long, treat it as stalled.
+const STALL_AFTER_MS = 120_000
+
 export default function PlanPage({ params }: PageProps) {
   const { id } = use(params)
   const router = useRouter()
-  const { object, submit, isLoading, error } = useObject({
+  const { object, submit, isLoading, error, stop } = useObject({
     api: '/api/plan',
     schema: PlanSchema,
   })
 
+  const [elapsed, setElapsed] = useState(0)
+  const [stalled, setStalled] = useState(false)
+  const lastChangeRef = useRef<number>(Date.now())
+  const startedRef = useRef<string | null>(null)
+
+  // Fire submit exactly once per id.
   useEffect(() => {
+    if (startedRef.current === id) return
+    startedRef.current = id
     submit({ projectId: id })
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id])
+
+  // Tick a visible elapsed-time counter and watch for stalled streams.
+  useEffect(() => {
+    if (!isLoading) return
+    const start = Date.now()
+    lastChangeRef.current = Date.now()
+    setStalled(false)
+    const interval = setInterval(() => {
+      setElapsed(Math.floor((Date.now() - start) / 1000))
+      if (Date.now() - lastChangeRef.current > STALL_AFTER_MS) {
+        setStalled(true)
+      }
+    }, 1000)
+    return () => clearInterval(interval)
+  }, [isLoading])
+
+  // Reset stall timer whenever the streamed object changes.
+  useEffect(() => {
+    lastChangeRef.current = Date.now()
+    setStalled(false)
+  }, [object])
+
+  function retry() {
+    startedRef.current = null
+    setElapsed(0)
+    setStalled(false)
+    startedRef.current = id
+    submit({ projectId: id })
+  }
 
   const plan = object
 
@@ -31,7 +71,7 @@ export default function PlanPage({ params }: PageProps) {
         <div>
           <h1 className="text-2xl font-semibold">Planlegger arkitekturen</h1>
           <p className="mt-1 text-sm text-zinc-600 dark:text-zinc-400">
-            Opus 4.7 (ultrathink) skisserer faser, konvensjoner og Skills.
+            Opus 4.7 (extended thinking) skisserer faser, konvensjoner og Skills.
           </p>
         </div>
         {!isLoading && plan && (
@@ -47,13 +87,59 @@ export default function PlanPage({ params }: PageProps) {
 
       {error && (
         <div className="rounded-md border border-red-300 bg-red-50 p-4 text-sm text-red-700">
-          Plan-fasen feilet. Prøv på nytt — hvis det skjer igjen, sjekk kvoten din.
+          <p className="font-medium">Plan-fasen feilet.</p>
+          <p className="mt-1 text-xs opacity-80">{error.message ?? String(error)}</p>
+          <button
+            type="button"
+            onClick={retry}
+            className="mt-2 rounded border border-red-300 px-2 py-1 text-xs hover:bg-red-100"
+          >
+            Prøv igjen
+          </button>
         </div>
       )}
 
-      {isLoading && !plan?.project_summary && (
-        <div className="rounded-md border border-zinc-200 bg-white p-5 text-sm text-zinc-500 dark:border-zinc-800 dark:bg-zinc-900">
-          Tenker… (kan ta 30-60 sekunder med ultrathink)
+      {isLoading && (
+        <div className="rounded-md border border-zinc-200 bg-white p-5 text-sm text-zinc-700 dark:border-zinc-800 dark:bg-zinc-900">
+          <div className="flex items-center justify-between gap-3">
+            <div>
+              <p className="font-medium">
+                {plan?.project_summary ? 'Skriver planen…' : 'Tenker…'}
+              </p>
+              <p className="mt-0.5 text-xs text-zinc-500">
+                {elapsed}s · Opus med extended thinking bruker typisk 60-120 sekunder.
+              </p>
+            </div>
+            <button
+              type="button"
+              onClick={() => {
+                stop()
+              }}
+              className="rounded border border-zinc-300 px-3 py-1.5 text-xs hover:border-red-500 hover:text-red-600 dark:border-zinc-700"
+            >
+              Avbryt
+            </button>
+          </div>
+          {stalled && (
+            <div className="mt-3 rounded border border-amber-300 bg-amber-50 p-3 text-xs text-amber-800">
+              <p className="font-medium">Streamen virker stoppet.</p>
+              <p className="mt-1">
+                Ingen nye data på {Math.floor(STALL_AFTER_MS / 1000)} sekunder. Vercel kan ha
+                kuttet kallet (Hobby-tier har 25s edge-timeout, Pro har 300s). Avbryt og prøv
+                igjen.
+              </p>
+              <button
+                type="button"
+                onClick={() => {
+                  stop()
+                  retry()
+                }}
+                className="mt-2 rounded border border-amber-400 px-2 py-1 hover:bg-amber-100"
+              >
+                Avbryt og start på nytt
+              </button>
+            </div>
+          )}
         </div>
       )}
 

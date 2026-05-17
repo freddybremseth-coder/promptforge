@@ -11,6 +11,7 @@ import { getPreset } from '@/presets'
 
 export const runtime = 'edge'
 export const dynamic = 'force-dynamic'
+export const maxDuration = 300
 
 const BodySchema = z.object({ projectId: z.string().uuid() })
 
@@ -89,10 +90,10 @@ export async function POST(req: Request) {
       ],
       providerOptions: {
         anthropic: {
-          thinking: { type: 'enabled', budgetTokens: 16000 },
+          thinking: { type: 'enabled', budgetTokens: 6000 },
         },
       },
-      maxTokens: 30000,
+      maxTokens: 16000,
       onError({ error }) {
         console.error('[plan] stream error', error)
       },
