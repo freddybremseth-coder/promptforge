@@ -22,7 +22,22 @@ const BodySchema = z.object({
   stepIndex: z.number().int().min(0),
 })
 
+// Loose output schema: model output only needs *some* content.
+// We re-wrap path/kind from the manifest below regardless.
+const LooseFileSchema = z.object({
+  path: z.string().optional(),
+  kind: z.string().optional(),
+  content: z.string().min(1),
+})
+
+function fail(err: unknown, where: string, status = 500) {
+  const detail = err instanceof Error ? `${err.name}: ${err.message}` : String(err)
+  console.error(`[render/file] ${where}:`, detail)
+  return NextResponse.json({ error: where, detail }, { status })
+}
+
 export async function POST(req: Request) {
+  try {
   const json = await req.json().catch(() => null)
   const parsed = BodySchema.safeParse(json)
   if (!parsed.success) {
@@ -30,8 +45,15 @@ export async function POST(req: Request) {
   }
   const { projectId, packageId, stepIndex } = parsed.data
 
-  const supabase = await createServerSupabaseClient()
-  const { data: { user } } = await supabase.auth.getUser()
+  let supabase: Awaited<ReturnType<typeof createServerSupabaseClient>>
+  try {
+    supabase = await createServerSupabaseClient()
+  } catch (e) {
+    return fail(e, 'supabase_client_init')
+  }
+  const { data: userData, error: userError } = await supabase.auth.getUser()
+  if (userError) return fail(userError, 'auth_getUser')
+  const user = userData?.user
   if (!user) return NextResponse.json({ error: 'unauthorized' }, { status: 401 })
 
   const { data: project, error: projectError } = await supabase
@@ -106,10 +128,11 @@ export async function POST(req: Request) {
     watermark: isFree && step.kind === 'claude_md',
   })
 
+  let generated
   try {
-    const result = await generateObject({
+    generated = await generateObject({
       model: anthropic(OPUS),
-      schema: PackageFileSchema,
+      schema: LooseFileSchema,
       messages: [
         {
           role: 'system',
@@ -120,41 +143,46 @@ export async function POST(req: Request) {
       ],
       maxTokens: 6000,
     })
+  } catch (e) {
+    return fail(e, `anthropic_generate_step_${stepIndex}_${step.kind}`)
+  }
 
-    // Sanity: the model sometimes wanders on path/kind. Force them to
-    // the manifest's declared values.
-    const file: PackageFile = {
-      path: step.path,
-      kind: step.kind,
-      content: result.object.content,
-    }
+  // Force path/kind from manifest so the model can't wander.
+  const file: PackageFile = {
+    path: step.path,
+    kind: step.kind,
+    content: generated.object.content,
+  }
 
-    const nextFiles = [...currentFiles, file]
-    const tokenUsed = (result.usage?.promptTokens ?? 0) + (result.usage?.completionTokens ?? 0)
+  const nextFiles = [...currentFiles, file]
+  const tokenUsed = (generated.usage?.promptTokens ?? 0) + (generated.usage?.completionTokens ?? 0)
+  const previousCost = (existingPackage as { token_cost?: number | null }).token_cost ?? 0
 
+  try {
     await admin
       .from('prompt_packages')
       .update({
         files: nextFiles,
-        token_cost: (existingPackage as { token_cost?: number | null }).token_cost
-          ? ((existingPackage as { token_cost?: number | null }).token_cost ?? 0) + tokenUsed
-          : tokenUsed,
+        token_cost: previousCost + tokenUsed,
       })
       .eq('id', packageId)
+  } catch (e) {
+    return fail(e, 'persist_file')
+  }
 
-    const done = nextFiles.length >= manifest.length
-    if (done) {
+  const done = nextFiles.length >= manifest.length
+  if (done) {
+    try {
       await admin.from('projects').update({ status: 'ready' }).eq('id', projectId)
       await incrementQuota(user.id)
+    } catch (e) {
+      console.warn('[render/file] finalize_failed', e)
     }
+  }
 
-    return NextResponse.json({ file, stepIndex, total: manifest.length, done })
-  } catch (err) {
-    console.error(`[render/file] step ${stepIndex} (${step.kind}) error`, err)
-    return NextResponse.json(
-      { error: 'generation_failed', detail: err instanceof Error ? err.message : 'unknown' },
-      { status: 500 }
-    )
+  return NextResponse.json({ file, stepIndex, total: manifest.length, done })
+  } catch (e) {
+    return fail(e, 'unhandled')
   }
 }
 
