@@ -1,9 +1,7 @@
-import { anthropic } from '@/lib/anthropic-provider'
-import { generateObject } from 'ai'
 import { NextResponse } from 'next/server'
 import { z } from 'zod'
 
-import { OPUS } from '@/lib/models'
+import { generateJson } from '@/lib/ai-json'
 import { PLAN_STRUCTURE_SYSTEM_PROMPT } from '@/lib/prompts/plan-structure-system'
 import { checkQuota } from '@/lib/quota'
 import { PhaseSchema, SkillBlueprintSchema } from '@/lib/schemas'
@@ -112,30 +110,15 @@ export async function POST(req: Request) {
 
     let structure
     try {
-      const result = await generateObject({
-        model: anthropic(OPUS),
+      const result = await generateJson({
         schema: LooseStructureSchema,
-        mode: 'json',
-        messages: [
-          {
-            role: 'system',
-            content: PLAN_STRUCTURE_SYSTEM_PROMPT,
-            providerOptions: { anthropic: { cacheControl: { type: 'ephemeral' } } },
-          },
-          { role: 'user', content: userMessage },
-        ],
+        system: PLAN_STRUCTURE_SYSTEM_PROMPT,
+        user: userMessage,
         maxTokens: 4000,
       })
       structure = result.object
     } catch (e) {
-      const raw =
-        e && typeof e === 'object' && 'text' in e ? String((e as { text?: unknown }).text) : ''
-      return fail(
-        new Error(
-          `${e instanceof Error ? e.message : String(e)}${raw ? ` :: raw=${raw.slice(0, 400)}` : ''}`
-        ),
-        'anthropic_generate'
-      )
+      return fail(e, 'anthropic_generate')
     }
 
     let mergedPlan: Record<string, unknown> = {}

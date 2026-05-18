@@ -1,13 +1,11 @@
-import { anthropic } from '@/lib/anthropic-provider'
-import { generateObject } from 'ai'
 import { NextResponse } from 'next/server'
 import { z } from 'zod'
 
-import { OPUS } from '@/lib/models'
+import { generateJson } from '@/lib/ai-json'
 import { getRenderSystemPrompt } from '@/lib/prompts/render-file-system'
 import { incrementQuota } from '@/lib/quota'
 import { buildManifest } from '@/lib/render-manifest'
-import { PackageFileSchema, PlanSchema, type PackageFile } from '@/lib/schemas'
+import { PlanSchema, type PackageFile } from '@/lib/schemas'
 import { createAdminSupabaseClient } from '@/lib/supabase/admin'
 import { createServerSupabaseClient } from '@/lib/supabase/server'
 import { getPreset } from '@/presets'
@@ -130,29 +128,14 @@ export async function POST(req: Request) {
 
   let generated
   try {
-    generated = await generateObject({
-      model: anthropic(OPUS),
+    generated = await generateJson({
       schema: LooseFileSchema,
-      mode: 'json',
-      messages: [
-        {
-          role: 'system',
-          content: getRenderSystemPrompt(step),
-          providerOptions: { anthropic: { cacheControl: { type: 'ephemeral' } } },
-        },
-        { role: 'user', content: userMessage },
-      ],
+      system: getRenderSystemPrompt(step),
+      user: userMessage,
       maxTokens: 6000,
     })
   } catch (e) {
-    const raw =
-      e && typeof e === 'object' && 'text' in e ? String((e as { text?: unknown }).text) : ''
-    return fail(
-      new Error(
-        `${e instanceof Error ? e.message : String(e)}${raw ? ` :: raw=${raw.slice(0, 400)}` : ''}`
-      ),
-      `anthropic_generate_step_${stepIndex}_${step.kind}`
-    )
+    return fail(e, `anthropic_generate_step_${stepIndex}_${step.kind}`)
   }
 
   // Force path/kind from manifest so the model can't wander.

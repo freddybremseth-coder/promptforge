@@ -1,9 +1,7 @@
-import { anthropic } from '@/lib/anthropic-provider'
-import { generateObject } from 'ai'
 import { NextResponse } from 'next/server'
 import { z } from 'zod'
 
-import { OPUS } from '@/lib/models'
+import { generateJson } from '@/lib/ai-json'
 import { PLAN_SUMMARY_SYSTEM_PROMPT } from '@/lib/prompts/plan-summary-system'
 import { checkQuota } from '@/lib/quota'
 import { ConventionSchema } from '@/lib/schemas'
@@ -108,32 +106,15 @@ export async function POST(req: Request) {
 
     let summary
     try {
-      const result = await generateObject({
-        model: anthropic(OPUS),
+      const result = await generateJson({
         schema: LooseSummarySchema,
-        mode: 'json',
-        messages: [
-          {
-            role: 'system',
-            content: PLAN_SUMMARY_SYSTEM_PROMPT,
-            providerOptions: { anthropic: { cacheControl: { type: 'ephemeral' } } },
-          },
-          { role: 'user', content: userMessage },
-        ],
+        system: PLAN_SUMMARY_SYSTEM_PROMPT,
+        user: userMessage,
         maxTokens: 3000,
       })
       summary = result.object
     } catch (e) {
-      // NoObjectGeneratedError carries the raw text the model returned —
-      // surface it so we can diagnose schema mismatches directly.
-      const raw =
-        e && typeof e === 'object' && 'text' in e ? String((e as { text?: unknown }).text) : ''
-      return fail(
-        new Error(
-          `${e instanceof Error ? e.message : String(e)}${raw ? ` :: raw=${raw.slice(0, 400)}` : ''}`
-        ),
-        'anthropic_generate'
-      )
+      return fail(e, 'anthropic_generate')
     }
 
     try {
