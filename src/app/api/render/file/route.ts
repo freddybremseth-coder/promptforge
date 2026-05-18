@@ -133,6 +133,7 @@ export async function POST(req: Request) {
     generated = await generateObject({
       model: anthropic(OPUS),
       schema: LooseFileSchema,
+      mode: 'json',
       messages: [
         {
           role: 'system',
@@ -144,7 +145,14 @@ export async function POST(req: Request) {
       maxTokens: 6000,
     })
   } catch (e) {
-    return fail(e, `anthropic_generate_step_${stepIndex}_${step.kind}`)
+    const raw =
+      e && typeof e === 'object' && 'text' in e ? String((e as { text?: unknown }).text) : ''
+    return fail(
+      new Error(
+        `${e instanceof Error ? e.message : String(e)}${raw ? ` :: raw=${raw.slice(0, 400)}` : ''}`
+      ),
+      `anthropic_generate_step_${stepIndex}_${step.kind}`
+    )
   }
 
   // Force path/kind from manifest so the model can't wander.

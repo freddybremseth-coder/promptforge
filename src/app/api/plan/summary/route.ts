@@ -111,6 +111,7 @@ export async function POST(req: Request) {
       const result = await generateObject({
         model: anthropic(OPUS),
         schema: LooseSummarySchema,
+        mode: 'json',
         messages: [
           {
             role: 'system',
@@ -123,7 +124,16 @@ export async function POST(req: Request) {
       })
       summary = result.object
     } catch (e) {
-      return fail(e, 'anthropic_generate')
+      // NoObjectGeneratedError carries the raw text the model returned —
+      // surface it so we can diagnose schema mismatches directly.
+      const raw =
+        e && typeof e === 'object' && 'text' in e ? String((e as { text?: unknown }).text) : ''
+      return fail(
+        new Error(
+          `${e instanceof Error ? e.message : String(e)}${raw ? ` :: raw=${raw.slice(0, 400)}` : ''}`
+        ),
+        'anthropic_generate'
+      )
     }
 
     try {
