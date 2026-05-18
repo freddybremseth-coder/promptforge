@@ -1,171 +1,217 @@
 'use client'
 
-import { experimental_useObject as useObject } from 'ai/react'
 import { useRouter } from 'next/navigation'
-import { use, useEffect, useRef, useState } from 'react'
+import { use, useCallback, useEffect, useRef, useState } from 'react'
 
 import { FileRenderer } from '@/components/FileRenderer'
-import { PackageSchema } from '@/lib/schemas'
+import type { PackageFile, RenderManifest, RenderStep } from '@/lib/schemas'
 
 interface PageProps {
   params: Promise<{ id: string }>
 }
 
-const STALL_AFTER_MS = 45_000
+interface StartResponse {
+  packageId: string
+  manifest: RenderManifest
+  remaining: number[]
+  alreadyDone: { path: string; kind: string }[]
+}
+
+interface FileResponse {
+  file: PackageFile
+  stepIndex: number
+  total: number
+  done: boolean
+}
+
+type Status = 'idle' | 'starting' | 'running' | 'done' | 'error'
+
+const MAX_RETRIES_PER_STEP = 2
 
 export default function GeneratePage({ params }: PageProps) {
   const { id } = use(params)
   const router = useRouter()
-  const { object, submit, isLoading, error, stop } = useObject({
-    api: '/api/render',
-    schema: PackageSchema,
-  })
-
-  const [elapsed, setElapsed] = useState(0)
-  const [stalled, setStalled] = useState(false)
-  const lastChangeRef = useRef<number>(Date.now())
   const startedRef = useRef<string | null>(null)
+  const [status, setStatus] = useState<Status>('idle')
+  const [manifest, setManifest] = useState<RenderManifest>([])
+  const [files, setFiles] = useState<PackageFile[]>([])
+  const [currentIndex, setCurrentIndex] = useState<number | null>(null)
+  const [elapsed, setElapsed] = useState(0)
+  const [errorMessage, setErrorMessage] = useState<string | null>(null)
+
+  const run = useCallback(async () => {
+    setStatus('starting')
+    setErrorMessage(null)
+    try {
+      const startRes = await fetch('/api/render/start', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ projectId: id }),
+      })
+      if (!startRes.ok) {
+        const body = await startRes.json().catch(() => ({}))
+        throw new Error(body.detail ?? body.error ?? `Start feilet (${startRes.status})`)
+      }
+      const start = (await startRes.json()) as StartResponse
+      setManifest(start.manifest)
+
+      // Recover any files that were already generated in a prior run.
+      // We don't have the content here — only the indices — so we fetch
+      // and rebuild after each new file is generated.
+
+      setStatus('running')
+      for (const i of start.remaining) {
+        setCurrentIndex(i)
+        setElapsed(0)
+        const startedAt = Date.now()
+        let lastErr: Error | null = null
+        for (let attempt = 0; attempt <= MAX_RETRIES_PER_STEP; attempt++) {
+          try {
+            const r = await fetch('/api/render/file', {
+              method: 'POST',
+              headers: { 'content-type': 'application/json' },
+              body: JSON.stringify({
+                projectId: id,
+                packageId: start.packageId,
+                stepIndex: i,
+              }),
+            })
+            if (!r.ok) {
+              const body = await r.json().catch(() => ({}))
+              throw new Error(body.detail ?? body.error ?? `Steg ${i} feilet (${r.status})`)
+            }
+            const data = (await r.json()) as FileResponse
+            setFiles((prev) => {
+              const existing = prev.find((f) => f.path === data.file.path)
+              return existing ? prev : [...prev, data.file]
+            })
+            lastErr = null
+            break
+          } catch (err) {
+            lastErr = err instanceof Error ? err : new Error(String(err))
+            // Brief backoff before retry.
+            await new Promise((r) => setTimeout(r, 800))
+          }
+        }
+        if (lastErr) throw lastErr
+        // Log the duration in dev — useful when tuning timeouts.
+        void (Date.now() - startedAt)
+      }
+
+      setCurrentIndex(null)
+      setStatus('done')
+      // Small UX delay so user sees the final ✓ before redirect.
+      setTimeout(() => router.push(`/new/${id}/done` as never), 800)
+    } catch (err) {
+      setStatus('error')
+      setErrorMessage(err instanceof Error ? err.message : 'Ukjent feil')
+    }
+  }, [id, router])
 
   useEffect(() => {
     if (startedRef.current === id) return
     startedRef.current = id
-    submit({ projectId: id })
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [id])
+    void run()
+  }, [id, run])
 
+  // Tick elapsed timer for the currently-running step.
   useEffect(() => {
-    if (!isLoading) return
+    if (currentIndex === null) return
     const start = Date.now()
-    lastChangeRef.current = Date.now()
-    setStalled(false)
-    const interval = setInterval(() => {
-      setElapsed(Math.floor((Date.now() - start) / 1000))
-      if (Date.now() - lastChangeRef.current > STALL_AFTER_MS) {
-        setStalled(true)
-      }
-    }, 1000)
-    return () => clearInterval(interval)
-  }, [isLoading])
+    const t = setInterval(() => setElapsed(Math.floor((Date.now() - start) / 1000)), 1000)
+    return () => clearInterval(t)
+  }, [currentIndex])
 
-  useEffect(() => {
-    lastChangeRef.current = Date.now()
-    setStalled(false)
-  }, [object])
-
-  const fileCount = object?.files?.length ?? 0
-  // Treat the render as complete only when each file has both a path and
-  // non-empty content. Partial streamed files have undefined fields.
-  const allFilesComplete =
-    fileCount > 0 &&
-    (object?.files ?? []).every((f) => f?.path && f?.content && f.content.length > 50)
-  const streamCutEarly = !isLoading && !error && startedRef.current === id && !allFilesComplete
-
-  useEffect(() => {
-    if (!isLoading && allFilesComplete && !error) {
-      const t = setTimeout(() => router.push(`/new/${id}/done` as never), 800)
-      return () => clearTimeout(t)
-    }
-  }, [isLoading, allFilesComplete, error, id, router])
-
-  function retry() {
-    startedRef.current = id
-    setElapsed(0)
-    setStalled(false)
-    submit({ projectId: id })
-  }
+  const total = manifest.length
+  const done = files.length
 
   return (
     <div className="space-y-4">
-      <header>
-        <h1 className="text-2xl font-semibold">Genererer pakken din</h1>
-        <p className="mt-1 text-sm text-zinc-600 dark:text-zinc-400">
-          Filer streames live mens Opus 4.7 skriver dem.
-        </p>
+      <header className="flex items-baseline justify-between gap-3">
+        <div>
+          <h1 className="text-2xl font-semibold">Genererer pakken din</h1>
+          <p className="mt-1 text-sm text-zinc-600 dark:text-zinc-400">
+            Hver fil genereres som et eget kort kall, så ingen request går over 60 sekunder.
+          </p>
+        </div>
+        {total > 0 && (
+          <p className="text-sm text-zinc-500">
+            {done} / {total} filer
+          </p>
+        )}
       </header>
 
-      {error && (
+      {status === 'error' && (
         <div className="rounded-md border border-red-300 bg-red-50 p-4 text-sm text-red-700">
           <p className="font-medium">Render feilet.</p>
-          <p className="mt-1 text-xs opacity-80">{error.message ?? String(error)}</p>
+          <p className="mt-1 text-xs opacity-80">{errorMessage}</p>
           <button
             type="button"
-            onClick={retry}
-            className="mt-2 rounded border border-red-300 px-2 py-1 text-xs hover:bg-red-100"
+            onClick={run}
+            className="mt-2 rounded border border-red-300 px-3 py-1.5 text-xs hover:bg-red-100"
           >
-            Prøv igjen
+            Prøv igjen — fortsetter der vi slapp
           </button>
         </div>
       )}
 
-      {streamCutEarly && (
-        <div className="rounded-md border border-amber-300 bg-amber-50 p-4 text-sm text-amber-900">
-          <p className="font-medium">Streamen ble avbrutt før alle filer var ferdige.</p>
-          <p className="mt-1 text-xs">
-            Vercel Hobby har 60s timeout. Pakken kommer fram etter 2-3 forsøk fordi cache
-            varmes opp.
-          </p>
-          <button
-            type="button"
-            onClick={retry}
-            className="mt-2 rounded border border-amber-400 px-3 py-1.5 text-xs hover:bg-amber-100"
-          >
-            Prøv igjen
-          </button>
-        </div>
+      {total > 0 && (
+        <ol className="grid gap-1.5">
+          {manifest.map((step, i) => (
+            <StepRow
+              key={step.path}
+              step={step}
+              index={i}
+              status={
+                files.some((f) => f.path === step.path)
+                  ? 'done'
+                  : currentIndex === i
+                    ? 'running'
+                    : 'pending'
+              }
+              elapsed={currentIndex === i ? elapsed : null}
+            />
+          ))}
+        </ol>
       )}
 
-      {isLoading && (
-        <div className="rounded-md border border-zinc-200 bg-white p-5 text-sm text-zinc-700 dark:border-zinc-800 dark:bg-zinc-900">
-          <div className="flex items-center justify-between gap-3">
-            <div>
-              <p className="font-medium">
-                {fileCount > 0 ? `Skriver fil ${fileCount}…` : 'Tenker…'}
-              </p>
-              <p className="mt-0.5 text-xs text-zinc-500">
-                {elapsed}s · Render tar typisk 60-180 sekunder for hele pakken.
-              </p>
-            </div>
-            <button
-              type="button"
-              onClick={() => stop()}
-              className="rounded border border-zinc-300 px-3 py-1.5 text-xs hover:border-red-500 hover:text-red-600 dark:border-zinc-700"
-            >
-              Avbryt
-            </button>
-          </div>
-          {stalled && (
-            <div className="mt-3 rounded border border-amber-300 bg-amber-50 p-3 text-xs text-amber-800">
-              <p className="font-medium">Streamen virker stoppet.</p>
-              <p className="mt-1">
-                Ingen nye data på {Math.floor(STALL_AFTER_MS / 1000)} sekunder. Vercel kan ha
-                kuttet kallet. Avbryt og prøv igjen.
-              </p>
-              <button
-                type="button"
-                onClick={() => {
-                  stop()
-                  retry()
-                }}
-                className="mt-2 rounded border border-amber-400 px-2 py-1 hover:bg-amber-100"
-              >
-                Avbryt og start på nytt
-              </button>
-            </div>
-          )}
-        </div>
-      )}
-
-      <div className="grid gap-3">
-        {(object?.files ?? []).map((f, i) => (
-          <FileRenderer
-            key={`${f?.path ?? i}`}
-            path={f?.path}
-            content={f?.content}
-            kind={f?.kind}
-            streaming={isLoading}
-          />
+      <div className="grid gap-3 pt-2">
+        {files.map((f) => (
+          <FileRenderer key={f.path} path={f.path} content={f.content} kind={f.kind} />
         ))}
       </div>
     </div>
+  )
+}
+
+function StepRow({
+  step,
+  index,
+  status,
+  elapsed,
+}: {
+  step: RenderStep
+  index: number
+  status: 'pending' | 'running' | 'done'
+  elapsed: number | null
+}) {
+  const dot =
+    status === 'done'
+      ? 'bg-emerald-500'
+      : status === 'running'
+        ? 'bg-brand-500 animate-pulse'
+        : 'bg-zinc-300'
+  return (
+    <li className="flex items-center gap-3 rounded-md border border-zinc-100 bg-white px-3 py-1.5 text-xs dark:border-zinc-800 dark:bg-zinc-900">
+      <span className={`h-2 w-2 rounded-full ${dot}`} />
+      <span className="font-mono text-zinc-700 dark:text-zinc-300">{step.path}</span>
+      <span className="ml-auto text-[10px] uppercase text-zinc-400">
+        {index + 1}. {step.kind.replace('_', ' ')}
+      </span>
+      {status === 'running' && elapsed !== null && (
+        <span className="text-[10px] text-zinc-500">{elapsed}s</span>
+      )}
+      {status === 'done' && <span className="text-emerald-600">✓</span>}
+    </li>
   )
 }

@@ -1,79 +1,98 @@
 'use client'
 
-import { experimental_useObject as useObject } from 'ai/react'
 import { useRouter } from 'next/navigation'
-import { use, useEffect, useRef, useState } from 'react'
+import { use, useCallback, useEffect, useRef, useState } from 'react'
 
-import { PlanSchema } from '@/lib/schemas'
+import { PlanSchema, type Plan } from '@/lib/schemas'
 
 interface PageProps {
   params: Promise<{ id: string }>
 }
 
-// If the stream produces nothing new for this long, treat it as stalled.
-// Tuned for Hobby tier's 60s Node window — anything past 45s without new
-// data is almost certainly cut.
-const STALL_AFTER_MS = 45_000
+type Step = 'idle' | 'summary' | 'structure' | 'done' | 'error'
+
+interface State {
+  step: Step
+  plan: Partial<Plan> | null
+  elapsed: number
+  errorMessage: string | null
+}
 
 export default function PlanPage({ params }: PageProps) {
   const { id } = use(params)
   const router = useRouter()
-  const { object, submit, isLoading, error, stop } = useObject({
-    api: '/api/plan',
-    schema: PlanSchema,
+  const [state, setState] = useState<State>({
+    step: 'idle',
+    plan: null,
+    elapsed: 0,
+    errorMessage: null,
   })
-
-  const [elapsed, setElapsed] = useState(0)
-  const [stalled, setStalled] = useState(false)
-  const lastChangeRef = useRef<number>(Date.now())
   const startedRef = useRef<string | null>(null)
+  const stepStartRef = useRef<number>(0)
 
-  // Fire submit exactly once per id.
+  const run = useCallback(async () => {
+    setState({ step: 'summary', plan: null, elapsed: 0, errorMessage: null })
+    stepStartRef.current = Date.now()
+
+    try {
+      // Step 1: summary + conventions
+      const r1 = await fetch('/api/plan/summary', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ projectId: id }),
+      })
+      if (!r1.ok) {
+        const body = await r1.json().catch(() => ({}))
+        throw new Error(body.detail ?? body.error ?? `Sammendrag feilet (${r1.status})`)
+      }
+      const { summary } = (await r1.json()) as { summary: Partial<Plan> }
+
+      setState((s) => ({ ...s, step: 'structure', plan: summary }))
+      stepStartRef.current = Date.now()
+
+      // Step 2: phases + skills + hooks
+      const r2 = await fetch('/api/plan/structure', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ projectId: id }),
+      })
+      if (!r2.ok) {
+        const body = await r2.json().catch(() => ({}))
+        throw new Error(body.detail ?? body.error ?? `Struktur feilet (${r2.status})`)
+      }
+      const { plan } = (await r2.json()) as { plan: Plan }
+      const validated = PlanSchema.safeParse(plan)
+      if (!validated.success) {
+        throw new Error('Generert plan passerte ikke validering: ' + validated.error.message)
+      }
+
+      setState({ step: 'done', plan: validated.data, elapsed: 0, errorMessage: null })
+    } catch (err) {
+      setState((s) => ({
+        ...s,
+        step: 'error',
+        errorMessage: err instanceof Error ? err.message : 'Ukjent feil',
+      }))
+    }
+  }, [id])
+
   useEffect(() => {
     if (startedRef.current === id) return
     startedRef.current = id
-    submit({ projectId: id })
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [id])
+    void run()
+  }, [id, run])
 
-  // Tick a visible elapsed-time counter and watch for stalled streams.
+  // Tick the elapsed timer while a step is running.
   useEffect(() => {
-    if (!isLoading) return
-    const start = Date.now()
-    lastChangeRef.current = Date.now()
-    setStalled(false)
-    const interval = setInterval(() => {
-      setElapsed(Math.floor((Date.now() - start) / 1000))
-      if (Date.now() - lastChangeRef.current > STALL_AFTER_MS) {
-        setStalled(true)
-      }
+    if (state.step !== 'summary' && state.step !== 'structure') return
+    const t = setInterval(() => {
+      setState((s) => ({ ...s, elapsed: Math.floor((Date.now() - stepStartRef.current) / 1000) }))
     }, 1000)
-    return () => clearInterval(interval)
-  }, [isLoading])
+    return () => clearInterval(t)
+  }, [state.step])
 
-  // Reset stall timer whenever the streamed object changes.
-  useEffect(() => {
-    lastChangeRef.current = Date.now()
-    setStalled(false)
-  }, [object])
-
-  function retry() {
-    startedRef.current = null
-    setElapsed(0)
-    setStalled(false)
-    startedRef.current = id
-    submit({ projectId: id })
-  }
-
-  const plan = object
-  // A complete plan must at minimum have a summary and at least one phase.
-  // useObject doesn't enforce schema during streaming, so we check ourselves.
-  const planComplete = Boolean(
-    plan?.project_summary && plan?.phases && plan.phases.length > 0
-  )
-  // Stream ended (isLoading false), no error fired, but plan never completed.
-  // Most common cause on Hobby: Vercel killed the function mid-stream.
-  const streamCutEarly = !isLoading && !error && startedRef.current === id && !planComplete
+  const plan = state.plan
+  const running = state.step === 'summary' || state.step === 'structure'
 
   return (
     <div className="space-y-6">
@@ -81,10 +100,10 @@ export default function PlanPage({ params }: PageProps) {
         <div>
           <h1 className="text-2xl font-semibold">Planlegger arkitekturen</h1>
           <p className="mt-1 text-sm text-zinc-600 dark:text-zinc-400">
-            Opus 4.7 skisserer faser, konvensjoner og Skills.
+            Opus 4.7 jobber i to korte etapper for å holde seg under Vercel-timeouten.
           </p>
         </div>
-        {!isLoading && planComplete && (
+        {state.step === 'done' && plan && (
           <button
             type="button"
             onClick={() => router.push(`/new/${id}/generate` as never)}
@@ -95,79 +114,52 @@ export default function PlanPage({ params }: PageProps) {
         )}
       </header>
 
-      {streamCutEarly && (
-        <div className="rounded-md border border-amber-300 bg-amber-50 p-4 text-sm text-amber-900">
-          <p className="font-medium">Streamen ble avbrutt før planen var ferdig.</p>
-          <p className="mt-1 text-xs">
-            Vercel Hobby har 60s timeout på serverless-funksjoner. Hvis Opus brukte lengre tid
-            enn det, ble kallet kuttet. Prøv igjen — kall som var halvveis fullføres ofte
-            raskere på neste forsøk (cache).
-          </p>
-          <button
-            type="button"
-            onClick={retry}
-            className="mt-2 rounded border border-amber-400 px-3 py-1.5 text-xs hover:bg-amber-100"
-          >
-            Prøv igjen
-          </button>
-        </div>
-      )}
+      <ol className="grid gap-2 sm:grid-cols-2">
+        <StepCard
+          index={1}
+          title="Sammendrag og konvensjoner"
+          status={
+            state.step === 'summary'
+              ? 'running'
+              : state.step === 'idle'
+                ? 'pending'
+                : 'done'
+          }
+          elapsed={state.step === 'summary' ? state.elapsed : null}
+        />
+        <StepCard
+          index={2}
+          title="Faser og Skills"
+          status={
+            state.step === 'structure'
+              ? 'running'
+              : state.step === 'done'
+                ? 'done'
+                : 'pending'
+          }
+          elapsed={state.step === 'structure' ? state.elapsed : null}
+        />
+      </ol>
 
-      {error && (
+      {state.step === 'error' && (
         <div className="rounded-md border border-red-300 bg-red-50 p-4 text-sm text-red-700">
           <p className="font-medium">Plan-fasen feilet.</p>
-          <p className="mt-1 text-xs opacity-80">{error.message ?? String(error)}</p>
+          <p className="mt-1 text-xs opacity-80">{state.errorMessage}</p>
           <button
             type="button"
-            onClick={retry}
-            className="mt-2 rounded border border-red-300 px-2 py-1 text-xs hover:bg-red-100"
+            onClick={run}
+            className="mt-2 rounded border border-red-300 px-3 py-1.5 text-xs hover:bg-red-100"
           >
             Prøv igjen
           </button>
         </div>
       )}
 
-      {isLoading && (
-        <div className="rounded-md border border-zinc-200 bg-white p-5 text-sm text-zinc-700 dark:border-zinc-800 dark:bg-zinc-900">
-          <div className="flex items-center justify-between gap-3">
-            <div>
-              <p className="font-medium">
-                {plan?.project_summary ? 'Skriver planen…' : 'Tenker…'}
-              </p>
-              <p className="mt-0.5 text-xs text-zinc-500">
-                {elapsed}s · Opus med extended thinking bruker typisk 60-120 sekunder.
-              </p>
-            </div>
-            <button
-              type="button"
-              onClick={() => {
-                stop()
-              }}
-              className="rounded border border-zinc-300 px-3 py-1.5 text-xs hover:border-red-500 hover:text-red-600 dark:border-zinc-700"
-            >
-              Avbryt
-            </button>
-          </div>
-          {stalled && (
-            <div className="mt-3 rounded border border-amber-300 bg-amber-50 p-3 text-xs text-amber-800">
-              <p className="font-medium">Streamen virker stoppet.</p>
-              <p className="mt-1">
-                Ingen nye data på {Math.floor(STALL_AFTER_MS / 1000)} sekunder. Vercel kan ha
-                kuttet kallet (Hobby-tier har 25s edge-timeout, Pro har 300s). Avbryt og prøv
-                igjen.
-              </p>
-              <button
-                type="button"
-                onClick={() => {
-                  stop()
-                  retry()
-                }}
-                className="mt-2 rounded border border-amber-400 px-2 py-1 hover:bg-amber-100"
-              >
-                Avbryt og start på nytt
-              </button>
-            </div>
-          )}
+      {running && (
+        <div className="rounded-md border border-zinc-200 bg-white p-4 text-sm text-zinc-700 dark:border-zinc-800 dark:bg-zinc-900">
+          {state.step === 'summary'
+            ? `Skriver sammendrag og konvensjoner… (${state.elapsed}s, typisk 15-30s)`
+            : `Skriver faser og Skills… (${state.elapsed}s, typisk 20-40s)`}
         </div>
       )}
 
@@ -182,16 +174,14 @@ export default function PlanPage({ params }: PageProps) {
         <section className="rounded-lg border border-zinc-200 bg-white p-5 dark:border-zinc-800 dark:bg-zinc-900">
           <h2 className="text-lg font-semibold">Konvensjoner</h2>
           <ul className="mt-3 space-y-2 text-sm">
-            {plan.conventions.map((c, i) =>
-              c ? (
-                <li key={i}>
-                  <span className="mr-2 rounded bg-zinc-100 px-1.5 py-0.5 font-mono text-xs uppercase text-zinc-700 dark:bg-zinc-800 dark:text-zinc-300">
-                    {c.severity}
-                  </span>
-                  {c.rule}
-                </li>
-              ) : null
-            )}
+            {plan.conventions.map((c, i) => (
+              <li key={i}>
+                <span className="mr-2 rounded bg-zinc-100 px-1.5 py-0.5 font-mono text-xs uppercase text-zinc-700 dark:bg-zinc-800 dark:text-zinc-300">
+                  {c.severity}
+                </span>
+                {c.rule}
+              </li>
+            ))}
           </ul>
         </section>
       )}
@@ -200,21 +190,19 @@ export default function PlanPage({ params }: PageProps) {
         <section className="rounded-lg border border-zinc-200 bg-white p-5 dark:border-zinc-800 dark:bg-zinc-900">
           <h2 className="text-lg font-semibold">Faser</h2>
           <ol className="mt-3 space-y-3 text-sm">
-            {plan.phases.map((p, i) =>
-              p ? (
-                <li key={i} className="rounded border border-zinc-100 p-3 dark:border-zinc-800">
-                  <div className="flex items-center justify-between">
-                    <strong>
-                      Fase {i}: {p.name}
-                    </strong>
-                    <span className="text-xs uppercase tracking-wide text-brand-600">
-                      {p.thinking_level}
-                    </span>
-                  </div>
-                  <p className="mt-1 text-zinc-600 dark:text-zinc-400">{p.goal}</p>
-                </li>
-              ) : null
-            )}
+            {plan.phases.map((p, i) => (
+              <li key={i} className="rounded border border-zinc-100 p-3 dark:border-zinc-800">
+                <div className="flex items-center justify-between">
+                  <strong>
+                    Fase {i}: {p.name}
+                  </strong>
+                  <span className="text-xs uppercase tracking-wide text-brand-600">
+                    {p.thinking_level}
+                  </span>
+                </div>
+                <p className="mt-1 text-zinc-600 dark:text-zinc-400">{p.goal}</p>
+              </li>
+            ))}
           </ol>
         </section>
       )}
@@ -223,17 +211,46 @@ export default function PlanPage({ params }: PageProps) {
         <section className="rounded-lg border border-zinc-200 bg-white p-5 dark:border-zinc-800 dark:bg-zinc-900">
           <h2 className="text-lg font-semibold">Skills</h2>
           <ul className="mt-3 space-y-2 text-sm">
-            {plan.skills_needed.map((s, i) =>
-              s ? (
-                <li key={i}>
-                  <code className="rounded bg-zinc-100 px-1.5 py-0.5 text-xs dark:bg-zinc-800">{s.name}</code>{' '}
-                  — {s.rationale}
-                </li>
-              ) : null
-            )}
+            {plan.skills_needed.map((s, i) => (
+              <li key={i}>
+                <code className="rounded bg-zinc-100 px-1.5 py-0.5 text-xs dark:bg-zinc-800">{s.name}</code>{' '}
+                — {s.rationale}
+              </li>
+            ))}
           </ul>
         </section>
       )}
     </div>
+  )
+}
+
+function StepCard({
+  index,
+  title,
+  status,
+  elapsed,
+}: {
+  index: number
+  title: string
+  status: 'pending' | 'running' | 'done'
+  elapsed: number | null
+}) {
+  const dot =
+    status === 'done'
+      ? 'bg-emerald-500'
+      : status === 'running'
+        ? 'bg-brand-500 animate-pulse'
+        : 'bg-zinc-300'
+  return (
+    <li className="flex items-center gap-3 rounded-md border border-zinc-200 bg-white px-3 py-2 text-sm dark:border-zinc-800 dark:bg-zinc-900">
+      <span className={`h-2 w-2 rounded-full ${dot}`} />
+      <span className="font-medium">
+        {index}. {title}
+      </span>
+      {status === 'running' && elapsed !== null && (
+        <span className="ml-auto text-xs text-zinc-500">{elapsed}s</span>
+      )}
+      {status === 'done' && <span className="ml-auto text-xs text-emerald-600">✓</span>}
+    </li>
   )
 }

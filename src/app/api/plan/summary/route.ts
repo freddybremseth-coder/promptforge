@@ -1,0 +1,103 @@
+import { anthropic } from '@ai-sdk/anthropic'
+import { generateObject } from 'ai'
+import { NextResponse } from 'next/server'
+import { z } from 'zod'
+
+import { OPUS } from '@/lib/models'
+import { PLAN_SUMMARY_SYSTEM_PROMPT } from '@/lib/prompts/plan-summary-system'
+import { checkQuota } from '@/lib/quota'
+import { PlanSummarySchema } from '@/lib/schemas'
+import { createServerSupabaseClient } from '@/lib/supabase/server'
+import { getPreset } from '@/presets'
+
+export const runtime = 'nodejs'
+export const dynamic = 'force-dynamic'
+export const maxDuration = 60
+
+const BodySchema = z.object({ projectId: z.string().uuid() })
+
+export async function POST(req: Request) {
+  const json = await req.json().catch(() => null)
+  const parsed = BodySchema.safeParse(json)
+  if (!parsed.success) {
+    return NextResponse.json({ error: 'invalid_body' }, { status: 400 })
+  }
+  const { projectId } = parsed.data
+
+  const supabase = await createServerSupabaseClient()
+  const { data: { user } } = await supabase.auth.getUser()
+  if (!user) return NextResponse.json({ error: 'unauthorized' }, { status: 401 })
+
+  const quota = await checkQuota(user.id)
+  if (!quota.ok) {
+    return NextResponse.json(
+      { error: 'quota_exceeded', plan: quota.plan, used: quota.used, limit: quota.limit },
+      { status: 402 }
+    )
+  }
+
+  const { data: project, error } = await supabase
+    .from('projects')
+    .select('id, user_id, raw_goal, context, preset')
+    .eq('id', projectId)
+    .single()
+  if (error || !project || project.user_id !== user.id) {
+    return NextResponse.json({ error: 'not_found' }, { status: 404 })
+  }
+
+  const preset = getPreset(project.preset)
+  if (!preset) {
+    return NextResponse.json({ error: 'unknown_preset' }, { status: 400 })
+  }
+
+  if (!process.env.ANTHROPIC_API_KEY) {
+    return NextResponse.json({ error: 'missing_anthropic_api_key' }, { status: 500 })
+  }
+
+  await supabase.from('projects').update({ status: 'generating' }).eq('id', projectId)
+
+  const userMessage = [
+    `# Project goal`,
+    project.raw_goal,
+    ``,
+    `# Interview answers`,
+    JSON.stringify(project.context, null, 2),
+    ``,
+    `# Preset: ${preset.name}`,
+    preset.stackContext,
+    ``,
+    `# Pre-existing conventions (baseline, you may extend)`,
+    preset.defaultConventions.map((c) => `- ${c}`).join('\n'),
+    ``,
+    `Produce the project_summary and at least 3 conventions.`,
+  ].join('\n')
+
+  try {
+    const result = await generateObject({
+      model: anthropic(OPUS),
+      schema: PlanSummarySchema,
+      messages: [
+        {
+          role: 'system',
+          content: PLAN_SUMMARY_SYSTEM_PROMPT,
+          providerOptions: { anthropic: { cacheControl: { type: 'ephemeral' } } },
+        },
+        { role: 'user', content: userMessage },
+      ],
+      maxTokens: 3000,
+    })
+
+    // Merge into projects.plan so the structure pass can build on it.
+    const existingPlan = (project as { plan?: Record<string, unknown> | null }).plan ?? {}
+    const mergedPlan = { ...(existingPlan ?? {}), ...result.object }
+    await supabase.from('projects').update({ plan: mergedPlan }).eq('id', projectId)
+
+    return NextResponse.json({ ok: true, summary: result.object })
+  } catch (err) {
+    console.error('[plan/summary] error', err)
+    return NextResponse.json(
+      { error: 'generation_failed', detail: err instanceof Error ? err.message : 'unknown' },
+      { status: 500 }
+    )
+  }
+}

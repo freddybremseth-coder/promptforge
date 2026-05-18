@@ -49,14 +49,25 @@ export const SkillBlueprintSchema = z.object({
   rationale: z.string().min(10),
 })
 
-export const PlanSchema = z.object({
+// Plan is generated in two passes so each fits within Vercel Hobby's 60s
+// serverless window. Pass 1 produces the summary + conventions; pass 2
+// reads them and produces the phases + skills + hooks.
+
+export const PlanSummarySchema = z.object({
   project_summary: z.string().min(50),
   conventions: z.array(ConventionSchema).min(3),
+})
+
+export const PlanStructureSchema = z.object({
   phases: z.array(PhaseSchema).min(1).max(5),
   skills_needed: z.array(SkillBlueprintSchema).max(4),
   hooks_recommended: z.array(z.string()).default([]),
 })
 
+export const PlanSchema = PlanSummarySchema.merge(PlanStructureSchema)
+
+export type PlanSummary = z.infer<typeof PlanSummarySchema>
+export type PlanStructure = z.infer<typeof PlanStructureSchema>
 export type Plan = z.infer<typeof PlanSchema>
 
 // ---------- Render (package files) ----------
@@ -76,3 +87,40 @@ export const PackageSchema = z.object({
 
 export type PackageFile = z.infer<typeof PackageFileSchema>
 export type PromptPackage = z.infer<typeof PackageSchema>
+
+// ---------- Render pipeline (multi-step) ----------
+// Render produces one file per server call to fit Hobby's 60s window.
+// /api/render/start computes a deterministic manifest from the plan;
+// /api/render/file generates file N and appends it to prompt_packages.files.
+
+export const RenderStepSchema = z.discriminatedUnion('kind', [
+  z.object({
+    kind: z.literal('claude_md'),
+    path: z.literal('CLAUDE.md'),
+  }),
+  z.object({
+    kind: z.literal('skill'),
+    path: z.string(),
+    skillName: z.string(),
+    skillDescription: z.string(),
+    skillRationale: z.string(),
+  }),
+  z.object({
+    kind: z.literal('phase_prompt'),
+    path: z.string(),
+    phaseIndex: z.number().int().min(0),
+    phaseName: z.string(),
+    phaseGoal: z.string(),
+    phaseThinkingLevel: z.string(),
+    phaseDependsOn: z.array(z.string()).default([]),
+  }),
+  z.object({
+    kind: z.literal('readme'),
+    path: z.literal('README.md'),
+  }),
+])
+
+export type RenderStep = z.infer<typeof RenderStepSchema>
+
+export const RenderManifestSchema = z.array(RenderStepSchema).min(1).max(20)
+export type RenderManifest = z.infer<typeof RenderManifestSchema>
