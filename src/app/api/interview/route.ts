@@ -1,4 +1,4 @@
-import { anthropic } from '@ai-sdk/anthropic'
+import { anthropic } from '@/lib/anthropic-provider'
 import { streamObject } from 'ai'
 import { z } from 'zod'
 

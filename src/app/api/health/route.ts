@@ -8,7 +8,7 @@ export const dynamic = 'force-dynamic'
 export async function GET() {
   return NextResponse.json({
     ok: true,
-    version: '48df225-plus',
+    version: 'temperature-strip',
     routes: ['api/plan/summary', 'api/plan/structure', 'api/render/start', 'api/render/file'],
     env: {
       hasAnthropic: Boolean(process.env.ANTHROPIC_API_KEY),

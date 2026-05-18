@@ -1,4 +1,4 @@
-import { anthropic } from '@ai-sdk/anthropic'
+import { anthropic } from '@/lib/anthropic-provider'
 import { generateObject } from 'ai'
 import { NextResponse } from 'next/server'
 import { z } from 'zod'
