@@ -16,18 +16,31 @@ async function callJson<T>(url: string, body: unknown): Promise<T> {
   const text = await res.text()
   const isJson = res.headers.get('content-type')?.includes('application/json')
   if (!res.ok) {
+    // Always log the raw body to console so we have the real server error
+    // even if the wrapper below loses detail.
+    console.error(`[callJson] ${url} failed`, {
+      status: res.status,
+      statusText: res.statusText,
+      contentType: res.headers.get('content-type'),
+      bodyPreview: text.slice(0, 800),
+    })
     if (isJson) {
       try {
         const parsed = JSON.parse(text) as { error?: string; detail?: string }
-        throw new Error(parsed.detail ?? parsed.error ?? `${url}: ${res.status}`)
+        const msg = parsed.detail
+          ? `${parsed.error ? parsed.error + ': ' : ''}${parsed.detail}`
+          : parsed.error ?? `${url}: ${res.status}`
+        throw new Error(msg)
       } catch (parseErr) {
-        if (parseErr instanceof Error && parseErr.message.includes(url)) throw parseErr
+        if (parseErr instanceof Error && parseErr.message !== `${url}: ${res.status}`) {
+          throw parseErr
+        }
       }
     }
     if (res.status === 404) {
       throw new Error(`${url} finnes ikke (404) — ny deploy er sannsynligvis ikke ferdig ennå`)
     }
-    throw new Error(`${url}: ${res.status} ${res.statusText}`)
+    throw new Error(`${url}: ${res.status} ${res.statusText || '(no status text)'} — sjekk Network → Response`)
   }
   if (!isJson) throw new Error(`${url}: serveren returnerte ikke JSON`)
   return JSON.parse(text) as T
@@ -130,25 +143,13 @@ export default function PlanPage({ params }: PageProps) {
         <StepCard
           index={1}
           title="Sammendrag og konvensjoner"
-          status={
-            state.step === 'summary'
-              ? 'running'
-              : state.step === 'idle'
-                ? 'pending'
-                : 'done'
-          }
+          status={stepStatus(state, 'summary')}
           elapsed={state.step === 'summary' ? state.elapsed : null}
         />
         <StepCard
           index={2}
           title="Faser og Skills"
-          status={
-            state.step === 'structure'
-              ? 'running'
-              : state.step === 'done'
-                ? 'done'
-                : 'pending'
-          }
+          status={stepStatus(state, 'structure')}
           elapsed={state.step === 'structure' ? state.elapsed : null}
         />
       </ol>
@@ -236,6 +237,28 @@ export default function PlanPage({ params }: PageProps) {
   )
 }
 
+function stepStatus(
+  state: State,
+  thisStep: 'summary' | 'structure'
+): 'pending' | 'running' | 'done' | 'failed' {
+  // Order: summary precedes structure. Once we move past 'summary', step 1
+  // is done. If we error while on a step, that step is failed.
+  if (state.step === 'error') {
+    if (thisStep === 'summary') {
+      // If we have a summary, step 1 must have succeeded before structure failed.
+      return state.plan?.project_summary ? 'done' : 'failed'
+    }
+    // Structure step failed only if we had reached it.
+    return state.plan?.project_summary ? 'failed' : 'pending'
+  }
+  if (state.step === 'idle') return 'pending'
+  if (state.step === thisStep) return 'running'
+  if (state.step === 'summary' && thisStep === 'structure') return 'pending'
+  if (state.step === 'structure' && thisStep === 'summary') return 'done'
+  if (state.step === 'done') return 'done'
+  return 'pending'
+}
+
 function StepCard({
   index,
   title,
@@ -244,15 +267,17 @@ function StepCard({
 }: {
   index: number
   title: string
-  status: 'pending' | 'running' | 'done'
+  status: 'pending' | 'running' | 'done' | 'failed'
   elapsed: number | null
 }) {
   const dot =
     status === 'done'
       ? 'bg-emerald-500'
-      : status === 'running'
-        ? 'bg-brand-500 animate-pulse'
-        : 'bg-zinc-300'
+      : status === 'failed'
+        ? 'bg-red-500'
+        : status === 'running'
+          ? 'bg-brand-500 animate-pulse'
+          : 'bg-zinc-300'
   return (
     <li className="flex items-center gap-3 rounded-md border border-zinc-200 bg-white px-3 py-2 text-sm dark:border-zinc-800 dark:bg-zinc-900">
       <span className={`h-2 w-2 rounded-full ${dot}`} />
@@ -263,6 +288,7 @@ function StepCard({
         <span className="ml-auto text-xs text-zinc-500">{elapsed}s</span>
       )}
       {status === 'done' && <span className="ml-auto text-xs text-emerald-600">✓</span>}
+      {status === 'failed' && <span className="ml-auto text-xs text-red-600">✗</span>}
     </li>
   )
 }

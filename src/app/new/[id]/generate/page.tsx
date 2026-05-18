@@ -15,18 +15,29 @@ async function callJson<T>(url: string, body: unknown): Promise<T> {
   const text = await res.text()
   const isJson = res.headers.get('content-type')?.includes('application/json')
   if (!res.ok) {
+    console.error(`[callJson] ${url} failed`, {
+      status: res.status,
+      statusText: res.statusText,
+      contentType: res.headers.get('content-type'),
+      bodyPreview: text.slice(0, 800),
+    })
     if (isJson) {
       try {
         const parsed = JSON.parse(text) as { error?: string; detail?: string }
-        throw new Error(parsed.detail ?? parsed.error ?? `${url}: ${res.status}`)
+        const msg = parsed.detail
+          ? `${parsed.error ? parsed.error + ': ' : ''}${parsed.detail}`
+          : parsed.error ?? `${url}: ${res.status}`
+        throw new Error(msg)
       } catch (parseErr) {
-        if (parseErr instanceof Error && parseErr.message.includes(url)) throw parseErr
+        if (parseErr instanceof Error && parseErr.message !== `${url}: ${res.status}`) {
+          throw parseErr
+        }
       }
     }
     if (res.status === 404) {
       throw new Error(`${url} finnes ikke (404) — ny deploy er sannsynligvis ikke ferdig ennå`)
     }
-    throw new Error(`${url}: ${res.status} ${res.statusText}`)
+    throw new Error(`${url}: ${res.status} ${res.statusText || '(no status text)'} — sjekk Network → Response`)
   }
   if (!isJson) throw new Error(`${url}: serveren returnerte ikke JSON`)
   return JSON.parse(text) as T
