@@ -5,6 +5,34 @@ import { use, useCallback, useEffect, useRef, useState } from 'react'
 
 import { PlanSchema, type Plan } from '@/lib/schemas'
 
+// Robust JSON POST: surfaces a readable error when the server returns
+// HTML (404 page, error page, etc.) instead of JSON.
+async function callJson<T>(url: string, body: unknown): Promise<T> {
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(body),
+  })
+  const text = await res.text()
+  const isJson = res.headers.get('content-type')?.includes('application/json')
+  if (!res.ok) {
+    if (isJson) {
+      try {
+        const parsed = JSON.parse(text) as { error?: string; detail?: string }
+        throw new Error(parsed.detail ?? parsed.error ?? `${url}: ${res.status}`)
+      } catch (parseErr) {
+        if (parseErr instanceof Error && parseErr.message.includes(url)) throw parseErr
+      }
+    }
+    if (res.status === 404) {
+      throw new Error(`${url} finnes ikke (404) — ny deploy er sannsynligvis ikke ferdig ennå`)
+    }
+    throw new Error(`${url}: ${res.status} ${res.statusText}`)
+  }
+  if (!isJson) throw new Error(`${url}: serveren returnerte ikke JSON`)
+  return JSON.parse(text) as T
+}
+
 interface PageProps {
   params: Promise<{ id: string }>
 }
@@ -36,31 +64,15 @@ export default function PlanPage({ params }: PageProps) {
 
     try {
       // Step 1: summary + conventions
-      const r1 = await fetch('/api/plan/summary', {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ projectId: id }),
-      })
-      if (!r1.ok) {
-        const body = await r1.json().catch(() => ({}))
-        throw new Error(body.detail ?? body.error ?? `Sammendrag feilet (${r1.status})`)
-      }
-      const { summary } = (await r1.json()) as { summary: Partial<Plan> }
+      const summary = await callJson<{ summary: Partial<Plan> }>('/api/plan/summary', {
+        projectId: id,
+      }).then((r) => r.summary)
 
       setState((s) => ({ ...s, step: 'structure', plan: summary }))
       stepStartRef.current = Date.now()
 
       // Step 2: phases + skills + hooks
-      const r2 = await fetch('/api/plan/structure', {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ projectId: id }),
-      })
-      if (!r2.ok) {
-        const body = await r2.json().catch(() => ({}))
-        throw new Error(body.detail ?? body.error ?? `Struktur feilet (${r2.status})`)
-      }
-      const { plan } = (await r2.json()) as { plan: Plan }
+      const { plan } = await callJson<{ plan: Plan }>('/api/plan/structure', { projectId: id })
       const validated = PlanSchema.safeParse(plan)
       if (!validated.success) {
         throw new Error('Generert plan passerte ikke validering: ' + validated.error.message)

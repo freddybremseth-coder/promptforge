@@ -6,6 +6,32 @@ import { use, useCallback, useEffect, useRef, useState } from 'react'
 import { FileRenderer } from '@/components/FileRenderer'
 import type { PackageFile, RenderManifest, RenderStep } from '@/lib/schemas'
 
+async function callJson<T>(url: string, body: unknown): Promise<T> {
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(body),
+  })
+  const text = await res.text()
+  const isJson = res.headers.get('content-type')?.includes('application/json')
+  if (!res.ok) {
+    if (isJson) {
+      try {
+        const parsed = JSON.parse(text) as { error?: string; detail?: string }
+        throw new Error(parsed.detail ?? parsed.error ?? `${url}: ${res.status}`)
+      } catch (parseErr) {
+        if (parseErr instanceof Error && parseErr.message.includes(url)) throw parseErr
+      }
+    }
+    if (res.status === 404) {
+      throw new Error(`${url} finnes ikke (404) — ny deploy er sannsynligvis ikke ferdig ennå`)
+    }
+    throw new Error(`${url}: ${res.status} ${res.statusText}`)
+  }
+  if (!isJson) throw new Error(`${url}: serveren returnerte ikke JSON`)
+  return JSON.parse(text) as T
+}
+
 interface PageProps {
   params: Promise<{ id: string }>
 }
@@ -43,16 +69,7 @@ export default function GeneratePage({ params }: PageProps) {
     setStatus('starting')
     setErrorMessage(null)
     try {
-      const startRes = await fetch('/api/render/start', {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ projectId: id }),
-      })
-      if (!startRes.ok) {
-        const body = await startRes.json().catch(() => ({}))
-        throw new Error(body.detail ?? body.error ?? `Start feilet (${startRes.status})`)
-      }
-      const start = (await startRes.json()) as StartResponse
+      const start = await callJson<StartResponse>('/api/render/start', { projectId: id })
       setManifest(start.manifest)
 
       // Recover any files that were already generated in a prior run.
@@ -67,20 +84,11 @@ export default function GeneratePage({ params }: PageProps) {
         let lastErr: Error | null = null
         for (let attempt = 0; attempt <= MAX_RETRIES_PER_STEP; attempt++) {
           try {
-            const r = await fetch('/api/render/file', {
-              method: 'POST',
-              headers: { 'content-type': 'application/json' },
-              body: JSON.stringify({
-                projectId: id,
-                packageId: start.packageId,
-                stepIndex: i,
-              }),
+            const data = await callJson<FileResponse>('/api/render/file', {
+              projectId: id,
+              packageId: start.packageId,
+              stepIndex: i,
             })
-            if (!r.ok) {
-              const body = await r.json().catch(() => ({}))
-              throw new Error(body.detail ?? body.error ?? `Steg ${i} feilet (${r.status})`)
-            }
-            const data = (await r.json()) as FileResponse
             setFiles((prev) => {
               const existing = prev.find((f) => f.path === data.file.path)
               return existing ? prev : [...prev, data.file]
